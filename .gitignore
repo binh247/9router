@@ -67,3 +67,6 @@ README1.md
 deploy*.sh
 ecosystem.config.*
 
+.data/usage.json
+.data/db.json
+.data/log.txt
