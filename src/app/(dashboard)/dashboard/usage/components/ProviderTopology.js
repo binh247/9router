@@ -439,22 +439,29 @@ function LiveStatsStrip({ stats }) {
     { key: "rpm", label: "rpm", value: stats.rpm.toString() },
     { key: "active", label: "active", value: stats.activeCount.toString() },
     { key: "streams", label: "streams", value: stats.streamCount.toString() },
-    { key: "err", label: "errors / 1m", value: stats.errorsPerMin.toString(), color: stats.errorsPerMin > 0 ? "text-red-500" : "text-text-muted" },
+    {
+      key: "err",
+      label: "errors / 1m",
+      value: stats.errorsPerMin.toString(),
+      color: stats.errorsPerMin > 0 ? "text-red-500" : "text-text-muted",
+    },
   ];
+
   return (
     <div className="shrink-0 mx-3 mt-3 mr-14 h-11 flex items-center gap-5 px-4 rounded-lg border border-border bg-bg/70 backdrop-blur-sm z-[5]">
       {chips.map((c, i) => (
         <div key={c.key} className="flex items-center">
           {i > 0 && <span className="mr-5 h-6 w-px bg-border" />}
+
           <div className="flex items-baseline gap-1.5">
             {c.arrow && <span className={`text-sm ${c.color}`}>{c.arrow}</span>}
-            <span className="text-[11px] uppercase tracking-wide text-text-muted">{c.label}</span>
-            <span className={`text-sm font-semibold tabular-nums ${c.color || "text-text"}`}>{c.value}</span>
+            <span className="text-[11px] uppercase tracking-wide text-text-muted">
+              {c.label}
+            </span>
+            <span className={`text-sm font-semibold tabular-nums ${c.color || "text-text"}`}>
+              {c.value}
+            </span>
           </div>
-    <div className="h-[320px] w-full min-w-0 rounded-lg border border-border bg-bg-subtle/30 sm:h-[480px]">
-      {providers.length === 0 ? (
-        <div className="h-full flex items-center justify-center text-text-muted text-sm">
-          No providers connected
         </div>
       ))}
     </div>
