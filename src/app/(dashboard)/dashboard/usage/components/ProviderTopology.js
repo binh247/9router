@@ -451,6 +451,10 @@ function LiveStatsStrip({ stats }) {
             <span className="text-[11px] uppercase tracking-wide text-text-muted">{c.label}</span>
             <span className={`text-sm font-semibold tabular-nums ${c.color || "text-text"}`}>{c.value}</span>
           </div>
+    <div className="h-[320px] w-full min-w-0 rounded-lg border border-border bg-bg-subtle/30 sm:h-[480px]">
+      {providers.length === 0 ? (
+        <div className="h-full flex items-center justify-center text-text-muted text-sm">
+          No providers connected
         </div>
       ))}
     </div>

@@ -51,6 +51,8 @@ const ALIAS_TO_PROVIDER_ID = {
   chutes: "chutes",
   ark: "volcengine-ark",
   "volcengine-ark": "volcengine-ark",
+  byteplus: "byteplus",
+  bpm: "byteplus",
   cursor: "cursor",
   vx: "vertex",
   vertex: "vertex",
@@ -61,6 +63,10 @@ const ALIAS_TO_PROVIDER_ID = {
   "grok-web": "grok-web",
   pw: "perplexity-web",
   "perplexity-web": "perplexity-web",
+  mimo: "xiaomi-mimo",
+  "xiaomi-mimo": "xiaomi-mimo",
+  cf: "cloudflare-ai",
+  "cloudflare-ai": "cloudflare-ai",
 };
 
 /**

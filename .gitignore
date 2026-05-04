@@ -71,3 +71,4 @@ ecosystem.config.*
 .data/usage.json
 .data/db.json
 .data/log.txt
+scripts/agSniffer/*
