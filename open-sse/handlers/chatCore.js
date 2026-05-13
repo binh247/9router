@@ -16,6 +16,7 @@ import { handleForcedSSEToJson } from "./chatCore/sseToJsonHandler.js";
 import { handleNonStreamingResponse } from "./chatCore/nonStreamingHandler.js";
 import { handleStreamingResponse, buildOnStreamComplete } from "./chatCore/streamingHandler.js";
 import { detectClientTool, isNativePassthrough } from "../utils/clientDetector.js";
+import { dedupeTools } from "../utils/toolDeduper.js";
 import { injectCaveman } from "../rtk/caveman.js";
 import { compressMessages, formatRtkLog } from "../rtk/index.js";
 
@@ -56,7 +57,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   }
 
   const clientRequestedStreaming = body.stream === true || sourceFormat === FORMATS.ANTIGRAVITY || sourceFormat === FORMATS.GEMINI || sourceFormat === FORMATS.GEMINI_CLI;
-  const providerRequiresStreaming = provider === "openai" || provider === "codex";
+  const providerRequiresStreaming = provider === "openai" || provider === "codex" || provider === "commandcode";
   let stream = providerRequiresStreaming ? true : (body.stream !== false);
 
   // Check client Accept header preference for non-streaming requests
@@ -92,6 +93,15 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     toolNameMap = translatedBody._toolNameMap;
     delete translatedBody._toolNameMap;
     translatedBody.model = model;
+  }
+
+  // Dedupe duplicate built-in tools when equivalent MCP tools are present (Claude clients only).
+  if (clientTool === "claude" && Array.isArray(translatedBody.tools)) {
+    const { tools: deduped, stripped } = dedupeTools(translatedBody.tools);
+    if (stripped.length > 0) {
+      translatedBody.tools = deduped;
+      log?.debug?.("TOOLDEDUP", `stripped ${stripped.length}: ${stripped.slice(0, 3).join(", ")}${stripped.length > 3 ? "..." : ""}`);
+    }
   }
 
   // Token savers: applied at the final body just before dispatch
