@@ -2,7 +2,6 @@
 
 import { useMemo, useState, useEffect, useCallback, useRef } from "react";
 import PropTypes from "prop-types";
-import { useRouter } from "next/navigation";
 import {
   ReactFlow,
   Handle,
@@ -104,42 +103,8 @@ RouterNode.propTypes = {
 
 const nodeTypes = { provider: ProviderNode, router: RouterNode };
 
-// Rolling 60-second aggregation over recentRequests. Defined at module scope
-// so React Compiler can memoize it; reading Date.now() inside useMemo would
-// be flagged as impure (react-hooks/purity).
-function computeLiveStats(recent, active) {
-  const now = Date.now();
-  const windowMs = 60_000;
-  let tokensIn = 0;
-  let tokensOut = 0;
-  let count = 0;
-  let errors = 0;
-  for (const r of recent || []) {
-    const t = r.timestamp ? new Date(r.timestamp).getTime() : NaN;
-    if (!Number.isFinite(t) || now - t > windowMs) continue;
-    tokensIn += r.promptTokens || 0;
-    tokensOut += r.completionTokens || 0;
-    count += 1;
-    const s = (r.status || "ok").toString().toLowerCase();
-    if (s !== "ok" && s !== "success" && s !== "200") errors += 1;
-  }
-  const activeCount = (active || []).length;
-  return {
-    tokensInPerSec: Math.round(tokensIn / 60),
-    tokensOutPerSec: Math.round(tokensOut / 60),
-    rpm: count,
-    errorsPerMin: errors,
-    activeCount,
-    // streamCount is a proxy until a dedicated SSE counter is exposed
-    streamCount: activeCount,
-  };
-}
-
 // Place N nodes evenly along an ellipse around the router center.
-// viewport = { width, height, isFullscreen } is optional — when provided and
-// isFullscreen is true, rx/ry scale with the container so the distance
-// between nodes grows, without ever changing node dimensions themselves.
-function buildLayout(providers, activeSet, lastSet, errorSet, viewport) {
+function buildLayout(providers, activeSet, lastSet, errorSet) {
   const nodeW = 180;
   const nodeH = 30;
   const routerW = 120;
@@ -150,23 +115,8 @@ function buildLayout(providers, activeSet, lastSet, errorSet, viewport) {
 
   // Compute rx so arc spacing between nodes >= nodeW + nodeGap
   const minRx = ((nodeW + nodeGap) * count) / (2 * Math.PI);
-
-  let rx;
-  let ry;
-  if (viewport && viewport.isFullscreen && viewport.width > 0 && viewport.height > 0) {
-    // In fullscreen: let radii expand with the available container so nodes
-    // spread out. Leave generous margin (nodeW/2 + padding) so nodes don't
-    // clip at the edges.
-    const marginX = nodeW / 2 + 48;
-    const marginY = nodeH / 2 + 48;
-    const maxRx = Math.max(minRx, viewport.width / 2 - marginX);
-    const maxRy = Math.max(minRx * 0.55, viewport.height / 2 - marginY);
-    rx = Math.max(minRx, maxRx);
-    ry = Math.max(minRx * 0.55, maxRy);
-  } else {
-    rx = Math.max(320, minRx);
-    ry = Math.max(200, rx * 0.55); // ellipse ratio ~0.55
-  }
+  const rx = Math.max(320, minRx);
+  const ry = Math.max(200, rx * 0.55); // ellipse ratio ~0.55
   if (count === 0) {
     return {
       nodes: [{ id: "router", type: "router", position: { x: 0, y: 0 }, data: { activeCount: 0 }, draggable: false }],
@@ -206,7 +156,7 @@ function buildLayout(providers, activeSet, lastSet, errorSet, viewport) {
       active,
     };
 
-    // Distribute evenly starting from top (−π/2), clockwise
+    // Distribute evenly starting from top (-π/2), clockwise
     const angle = -Math.PI / 2 + (2 * Math.PI * i) / count;
     const cx = rx * Math.cos(angle);
     const cy = ry * Math.sin(angle);
@@ -245,13 +195,7 @@ function buildLayout(providers, activeSet, lastSet, errorSet, viewport) {
   return { nodes, edges };
 }
 
-export default function ProviderTopology({
-  providers = [],
-  activeRequests = [],
-  lastProvider = "",
-  errorProvider = "",
-  recentRequests = [],
-}) {
+export default function ProviderTopology({ providers = [], activeRequests = [], lastProvider = "", errorProvider = "" }) {
   // Serialize to stable string keys so useMemo only re-runs when values actually change
   const activeKey = useMemo(
     () => activeRequests.map((r) => r.provider?.toLowerCase()).filter(Boolean).sort().join(","),
@@ -300,11 +244,10 @@ export default function ProviderTopology({
     [providers, activeSet, lastKey, errorKey]
   );
 
-  // Stable key — remount only when provider list or fullscreen mode changes
-  // (remounting on fullscreen toggle ensures the initial viewport centers correctly)
+  // Stable key — only remount when provider list changes
   const providersKey = useMemo(
-    () => providers.map((p) => p.provider).sort().join(",") + "|" + (isFullscreen ? "fs" : "n"),
-    [providers, isFullscreen]
+    () => providers.map((p) => p.provider).sort().join(","),
+    [providers]
   );
 
   const rfInstance = useRef(null);
@@ -367,19 +310,6 @@ export default function ProviderTopology({
     </div>
   );
 }
-
-LiveRequestLog.propTypes = {
-  requests: PropTypes.arrayOf(
-    PropTypes.shape({
-      timestamp: PropTypes.string,
-      model: PropTypes.string,
-      provider: PropTypes.string,
-      promptTokens: PropTypes.number,
-      completionTokens: PropTypes.number,
-      status: PropTypes.string,
-    })
-  ),
-};
 
 ProviderTopology.propTypes = {
   providers: PropTypes.arrayOf(PropTypes.shape({

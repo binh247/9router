@@ -27,6 +27,27 @@ const connCache = global._connectionMapCache;
 
 export const statsEmitter = global._statsEmitter;
 
+// Safety-net sweeper: removes stuck/zero entries from pending maps every 5 minutes.
+// Protects against edge cases where pending counters drift (process crash mid-request,
+// emitter listener errors, etc.) and prevents in-memory maps from growing unbounded.
+if (!global._pendingSweeper) {
+  global._pendingSweeper = setInterval(() => {
+    try {
+      for (const k of Object.keys(pendingRequests.byModel)) {
+        if (!(pendingRequests.byModel[k] > 0)) delete pendingRequests.byModel[k];
+      }
+      for (const connId of Object.keys(pendingRequests.byAccount)) {
+        const models = pendingRequests.byAccount[connId];
+        for (const mk of Object.keys(models)) {
+          if (!(models[mk] > 0)) delete models[mk];
+        }
+        if (Object.keys(models).length === 0) delete pendingRequests.byAccount[connId];
+      }
+    } catch {}
+  }, 5 * 60 * 1000);
+  if (typeof global._pendingSweeper.unref === "function") global._pendingSweeper.unref();
+}
+
 function getLocalDateKey(timestamp) {
   const d = timestamp ? new Date(timestamp) : new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
@@ -174,9 +195,13 @@ export function trackPendingRequest(model, provider, connectionId, started, erro
     clearTimeout(pendingTimers[timerKey]);
     pendingTimers[timerKey] = setTimeout(() => {
       delete pendingTimers[timerKey];
-      if (pendingRequests.byModel[modelKey] > 0) pendingRequests.byModel[modelKey] = 0;
-      if (connectionId && pendingRequests.byAccount[connectionId]?.[modelKey] > 0) {
-        pendingRequests.byAccount[connectionId][modelKey] = 0;
+      // Fully delete keys (not just zero them) so the maps don't grow unbounded
+      if (pendingRequests.byModel[modelKey] >= 0) delete pendingRequests.byModel[modelKey];
+      if (connectionId && pendingRequests.byAccount[connectionId]) {
+        delete pendingRequests.byAccount[connectionId][modelKey];
+        if (Object.keys(pendingRequests.byAccount[connectionId]).length === 0) {
+          delete pendingRequests.byAccount[connectionId];
+        }
       }
       statsEmitter.emit("pending");
     }, PENDING_TIMEOUT_MS);
