@@ -1,8 +1,10 @@
 import { BaseExecutor } from "./base.js";
 import { PROVIDERS } from "../config/providers.js";
+import { resolveKiroModel } from "../config/kiroConstants.js";
 import { v4 as uuidv4 } from "uuid";
 import { refreshKiroToken } from "../services/tokenRefresh.js";
 import { SSE_DONE, SSE_HEADERS } from "../utils/sseConstants.js";
+import { getCapabilitiesForModel } from "../providers/capabilities.js";
 
 /**
  * KiroExecutor - Executor for Kiro AI (AWS CodeWhisperer)
@@ -20,11 +22,71 @@ export class KiroExecutor extends BaseExecutor {
       "Amz-Sdk-Invocation-Id": uuidv4()
     };
 
-    if (credentials.accessToken) {
+    // API-key auth: the key is stored as accessToken and sent as a bearer token
+    // exactly like an OAuth access token, but with an extra `tokentype: API_KEY`
+    // header so CodeWhisperer treats it as a long-lived API key rather than an
+    // OIDC/social access token. Mirrors the Kiro IDE headless-auth behavior.
+    // Enterprise / Microsoft Entra (external_idp) tokens are OAuth access tokens,
+    // but CodeWhisperer requires TokenType=EXTERNAL_IDP to bind them to profiles.
+    const authMethod = credentials?.providerSpecificData?.authMethod;
+    const isApiKey = authMethod === "api_key";
+    const isExternalIdp = authMethod === "external_idp";
+
+    const apiKey = credentials?.apiKey || (isApiKey ? credentials?.accessToken : null);
+    if (isApiKey && apiKey) {
+      headers["Authorization"] = `Bearer ${apiKey}`;
+      headers["tokentype"] = "API_KEY";
+    } else if (credentials.accessToken) {
       headers["Authorization"] = `Bearer ${credentials.accessToken}`;
+      if (isExternalIdp) {
+        headers["TokenType"] = "EXTERNAL_IDP";
+      }
     }
 
     return headers;
+  }
+
+  /**
+   * Auth-aware endpoint ordering.
+   *
+   * API-key Kiro connections store a raw CodeWhisperer credential (validated
+   * against codewhisperer.us-east-1.amazonaws.com via ListAvailableProfiles).
+   * The Kiro IDE gateway (runtime.*.kiro.dev) expects Kiro OIDC/social tokens
+   * and rejects an `tokentype: API_KEY` token with 401/403 — which
+   * BaseExecutor.execute() returns immediately (only 429 / network errors fall
+   * through to the next host). So for api-key auth we must try the *.amazonaws.com
+   * CodeWhisperer hosts FIRST, mirroring the Kiro-Go reference fork which never
+   * routes api-key traffic through kiro.dev. External IdP enterprise tokens also
+   * use the CodeWhisperer surface, with the `TokenType: EXTERNAL_IDP` header.
+   * Other OAuth methods keep the default order (kiro.dev first) since their
+   * tokens are what that gateway accepts.
+   */
+  getOrderedBaseUrls(credentials) {
+    const baseUrls = this.getBaseUrls();
+    const authMethod = credentials?.providerSpecificData?.authMethod;
+    // IAM Identity Center (idc) tokens are AWS SSO access tokens — the same
+    // family as external_idp/api_key. The kiro.dev gateway rejects them with
+    // 403 "bearer token invalid", so they must hit the CodeWhisperer
+    // *.amazonaws.com surface, and in the region the token was minted in
+    // (the baseUrls are hardcoded us-east-1).
+    const isCodeWhispererSurface =
+      authMethod === "api_key" || authMethod === "external_idp" || authMethod === "idc";
+    if (!isCodeWhispererSurface) return baseUrls;
+
+    const region = (credentials?.providerSpecificData?.region || "us-east-1").trim();
+    const regionalize = (u) =>
+      region && region !== "us-east-1" && u.includes("amazonaws.com")
+        ? u.replace(/([a-z]+)\.[a-z0-9-]+\.amazonaws\.com/, `$1.${region}.amazonaws.com`)
+        : u;
+
+    const amazon = baseUrls.filter((u) => u.includes("amazonaws.com")).map(regionalize);
+    const others = baseUrls.filter((u) => !u.includes("amazonaws.com"));
+    return amazon.length > 0 ? [...amazon, ...others] : baseUrls;
+  }
+
+  buildUrl(model, stream, urlIndex = 0, credentials = null) {
+    const baseUrls = this.getOrderedBaseUrls(credentials);
+    return baseUrls[urlIndex] || baseUrls[0] || this.config.baseUrl;
   }
 
   transformRequest(model, body, stream, credentials) {
@@ -38,6 +100,8 @@ export class KiroExecutor extends BaseExecutor {
    * BaseExecutor.execute() walks config.baseUrls (runtime.us-east-1.kiro.dev →
    * codewhisperer → q) advancing to the next host on 429 (shouldRetry) and on
    * network/5xx errors, while tryRetry handles in-place retries per `retry: {429: 2}`.
+   * Note: api-key connections reorder these so the *.amazonaws.com hosts come
+   * first — see getOrderedBaseUrls/buildUrl above.
    * Note: the baseUrls are alternate surfaces of one regional service, so rotation
    * is edge-level failover — it does not grant fresh 429 quota. Per-account 429
    * spreading is handled upstream by account rotation in sse/handlers/chat.js.
@@ -62,6 +126,8 @@ export class KiroExecutor extends BaseExecutor {
     let chunkIndex = 0;
     const responseId = `chatcmpl-${Date.now()}`;
     const created = Math.floor(Date.now() / 1000);
+    const capabilityModel = resolveKiroModel(model).upstream;
+    const contextWindow = getCapabilitiesForModel("kiro", capabilityModel).contextWindow || 200000;
     const state = {
       endDetected: false,
       finishEmitted: false,
@@ -69,11 +135,14 @@ export class KiroExecutor extends BaseExecutor {
       hasReasoningContent: false,
       reasoningChunkCount: 0,
       toolCallIndex: 0,
-      seenToolIds: new Map()
+      seenToolIds: new Map(),
+      inThinking: false
     };
 
     const transformStream = new TransformStream({
       async transform(chunk, controller) {
+             // Track output so we can emit a keepalive if this frame yields no chunk.
+        const enqueueCountBefore = chunkIndex;
         // Append to buffer
         const newBuffer = new Uint8Array(buffer.length + chunk.length);
         newBuffer.set(buffer);
@@ -97,16 +166,45 @@ export class KiroExecutor extends BaseExecutor {
           if (!event) continue;
 
           const eventType = event.headers[":event-type"] || "";
-          
+
           // Track total content length for token estimation
           if (!state.totalContentLength) state.totalContentLength = 0;
           if (!state.contextUsagePercentage) state.contextUsagePercentage = 0;
 
           // Handle assistantResponseEvent
           if (eventType === "assistantResponseEvent" && event.payload?.content) {
-            const content = event.payload.content;
+            let content = event.payload.content;
+
+            // Kiro Claude models can leak <thinking> blocks into the content stream.
+            // We strip these literal tags to prevent duplication, as the reasoning 
+            // is already routed correctly via reasoningContentEvent.
+            if (state.inThinking) {
+              if (content.includes("</thinking>")) {
+                state.inThinking = false;
+                const after = content.split("</thinking>").slice(1).join("</thinking>");
+                content = after.startsWith("\n") ? after.substring(1) : after;
+              } else {
+                content = ""; // Drop entirely while inside thinking block
+              }
+            } else if (content.includes("<thinking>")) {
+              state.inThinking = true;
+              if (content.includes("</thinking>")) {
+                state.inThinking = false;
+                const before = content.split("<thinking>")[0];
+                const after = content.split("</thinking>").slice(1).join("</thinking>");
+                content = before + (after.startsWith("\n") ? after.substring(1) : after);
+              } else {
+                content = content.split("<thinking>")[0];
+              }
+            }
+
+            if (!content && state.hasReasoningContent) {
+              // If we stripped everything, skip emitting an empty content chunk
+              continue;
+            }
+
             state.totalContentLength += content.length;
-            
+
             const chunk = {
               id: responseId,
               object: "chat.completion.chunk",
@@ -293,13 +391,24 @@ export class KiroExecutor extends BaseExecutor {
             if (metrics && typeof metrics === 'object') {
               const inputTokens = metrics.inputTokens || 0;
               const outputTokens = metrics.outputTokens || 0;
-              
+              // ponytail: Amazon Q upstream does not expose cache fields today,
+              // but pick up cache_read_input_tokens / cache_creation_input_tokens
+              // if the event shape grows them so cost tracking stays accurate.
+              const cachedTokens = metrics.cacheReadInputTokens || metrics.cache_read_input_tokens || 0;
+              const cacheCreationInputTokens = metrics.cacheCreationInputTokens || metrics.cache_creation_input_tokens || 0;
+
               if (inputTokens > 0 || outputTokens > 0) {
                 state.usage = {
                   prompt_tokens: inputTokens,
                   completion_tokens: outputTokens,
                   total_tokens: inputTokens + outputTokens
                 };
+                // Kiro is Claude-backed: inputTokens EXCLUDES cache (Claude convention),
+                // not inclusive like OpenAI's cached_tokens. Emit cache_read_input_tokens
+                // (not cached_tokens) so canonicalizeUsage takes the Claude fold path and
+                // correctly adds cache back into prompt_tokens instead of undercharging.
+                if (cachedTokens > 0) state.usage.cache_read_input_tokens = cachedTokens;
+                if (cacheCreationInputTokens > 0) state.usage.cache_creation_input_tokens = cacheCreationInputTokens;
               }
             }
           }
@@ -307,27 +416,26 @@ export class KiroExecutor extends BaseExecutor {
           // Emit final chunk only after receiving BOTH meteringEvent AND contextUsageEvent
           if (state.hasMeteringEvent && state.hasContextUsage && !state.finishEmitted) {
             state.finishEmitted = true;
-            
+
             // Estimate tokens if not available from events
             if (!state.usage) {
               // Estimate output tokens from content length
-              const estimatedOutputTokens = state.totalContentLength > 0 
+              const estimatedOutputTokens = state.totalContentLength > 0
                 ? Math.max(1, Math.floor(state.totalContentLength / 4))
                 : 0;
-              
+
               // Estimate input tokens from contextUsagePercentage
-              // Kiro models typically have 200k context window
               const estimatedInputTokens = state.contextUsagePercentage > 0
-                ? Math.floor(state.contextUsagePercentage * 200000 / 100)
+                ? Math.floor(state.contextUsagePercentage * contextWindow / 100)
                 : 0;
-              
+
               state.usage = {
                 prompt_tokens: estimatedInputTokens,
                 completion_tokens: estimatedOutputTokens,
                 total_tokens: estimatedInputTokens + estimatedOutputTokens
               };
             }
-            
+
             const finishChunk = {
               id: responseId,
               object: "chat.completion.chunk",
@@ -339,12 +447,12 @@ export class KiroExecutor extends BaseExecutor {
                 finish_reason: state.hasToolCalls ? "tool_calls" : "stop"
               }]
             };
-            
+
             // Include usage in final chunk if available
             if (state.usage) {
               finishChunk.usage = state.usage;
             }
-            
+
             controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(finishChunk)}\n\n`));
           }
         }
@@ -352,6 +460,12 @@ export class KiroExecutor extends BaseExecutor {
         if (iterations >= maxIterations) {
           console.warn("[Kiro] Max iterations reached in event parsing");
         }
+
+        // No client chunk produced this frame — emit an SSE comment keepalive
+                // so the stall watchdog sees upstream activity (ignored by parser/client).
+                if (chunkIndex === enqueueCountBefore && !state.finishEmitted) {
+                  controller.enqueue(new TextEncoder().encode(": ka\n\n"));
+                }
       },
 
       flush(controller) {

@@ -79,6 +79,8 @@ const LOCAL_ONLY_PATHS = [
   "/api/oauth/cursor/auto-import",
   "/api/oauth/kiro/auto-import",
   "/api/auth/reset-password",
+  "/api/headroom/start",
+  "/api/headroom/stop",
 ];
 
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
@@ -90,6 +92,9 @@ function isLoopbackHostname(h) {
 }
 
 export function isLocalRequest(request) {
+  // Stamped by custom-server.js when forwarding headers exist: request came through
+  // a reverse proxy, so the loopback socket is the proxy hop, not the end-user.
+  if (request.headers.get("x-9r-via-proxy")) return false;
   // Trusted peer IP from TCP socket (custom-server.js); unspoofable. Primary anchor for "local".
   const realIp = request.headers.get("x-9r-real-ip");
   if (realIp) {
@@ -114,7 +119,11 @@ function isPublicLlmApi(pathname) {
 function extractApiKey(request) {
   const authHeader = request.headers.get("Authorization");
   if (authHeader?.startsWith("Bearer ")) return authHeader.slice(7);
-  return request.headers.get("x-api-key");
+  const apiKeyHeader = request.headers.get("x-api-key");
+  if (apiKeyHeader) return apiKeyHeader;
+  const googleApiKeyHeader = request.headers.get("x-goog-api-key");
+  if (googleApiKeyHeader) return googleApiKeyHeader;
+  return request.nextUrl.searchParams?.get("key") || null;
 }
 
 async function hasValidApiKey(request) {

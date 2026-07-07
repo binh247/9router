@@ -8,7 +8,7 @@ import { v4 as uuidv4 } from "uuid";
 import { resolveSessionId } from "../../utils/sessionManager.js";
 import {
   resolveKiroModel,
-  isThinkingEnabled,
+  resolveKiroThinkingBudget,
   buildThinkingSystemPrefix,
   KIRO_AGENTIC_SYSTEM_PROMPT,
   resolveDefaultProfileArn
@@ -519,13 +519,28 @@ export function openaiToKiroRequest(model, body, stream, credentials) {
   const temperature = body.temperature;
   const topP = body.top_p;
 
-  const { upstream: upstreamModel, agentic, thinking: modelImpliesThinking } = resolveKiroModel(model);
-  const thinkingEnabled = modelImpliesThinking || isThinkingEnabled(body, null, model);
+  const { upstream: upstreamModel, agentic } = resolveKiroModel(model);
+  const thinkingBudget = resolveKiroThinkingBudget(body, credentials?.rawHeaders, model);
 
   const { history, currentMessage } = convertMessages(messages, tools, upstreamModel);
 
-  const profileArn = credentials?.providerSpecificData?.profileArn
-    || resolveDefaultProfileArn(credentials?.providerSpecificData?.authMethod);
+  // API-key (headless) auth uses a raw CodeWhisperer credential whose profile is
+  // account-specific. Injecting the shared builder-id/social *default* placeholder
+  // ARN makes CodeWhisperer reject the request with 403 "bearer token invalid"
+  // (the ARN doesn't belong to the key's account). So for api_key, only send a
+  // profileArn that was actually resolved for this connection — never the default.
+  // OAuth/social keep the default fallback (their tokens accept it).
+  // api_key / idc / external_idp carry an account-specific (or token-bound)
+  // profile. The shared builder-id/social default ARN belongs to a different
+  // account and triggers 403 "bearer token invalid", so never fall back to it —
+  // send the resolved ARN, or an empty string so CodeWhisperer uses the token's
+  // own default profile. Only OAuth/social keep the shared placeholder.
+  const authMethod = credentials?.providerSpecificData?.authMethod;
+  const accountBoundAuth =
+    authMethod === "api_key" || authMethod === "idc" || authMethod === "external_idp";
+  const profileArn = accountBoundAuth
+    ? (credentials?.providerSpecificData?.profileArn || "")
+    : (credentials?.providerSpecificData?.profileArn || resolveDefaultProfileArn(authMethod));
 
   let finalContent = currentMessage?.userInputMessage?.content || "";
 
@@ -535,8 +550,8 @@ export function openaiToKiroRequest(model, body, stream, credentials) {
   // Order: thinking_mode tag first (so Kiro sees it before any user text),
   // then context/timestamp marker, then optional agentic chunked-write prompt.
   const prefixParts = [];
-  if (thinkingEnabled) {
-    prefixParts.push(buildThinkingSystemPrefix());
+  if (thinkingBudget !== null) {
+    prefixParts.push(buildThinkingSystemPrefix(thinkingBudget));
   }
   prefixParts.push(`[Context: Current time is ${timestamp}]`);
   if (agentic) {
