@@ -14,10 +14,9 @@ import Badge from "./Badge";
 import Card from "./Card";
 import OverviewCards from "@/app/(dashboard)/dashboard/usage/components/OverviewCards";
 import UsageTable, { fmt, fmtTime } from "@/app/(dashboard)/dashboard/usage/components/UsageTable";
-import ProviderTopology from "@/app/(dashboard)/dashboard/usage/components/ProviderTopologyWithFullscreen";
 import dynamic from "next/dynamic";
 // Lazy-load: keeps @xyflow/react out of the shared bundle until topology renders
-const ProviderTopology = dynamic(() => import("@/app/(dashboard)/dashboard/usage/components/ProviderTopology"), { ssr: false });
+const ProviderTopology = dynamic(() => import("@/app/(dashboard)/dashboard/usage/components/ProviderTopologyWithFullscreen"), { ssr: false });
 import UsageChart from "@/app/(dashboard)/dashboard/usage/components/UsageChart";
 
 function timeAgo(timestamp) {
